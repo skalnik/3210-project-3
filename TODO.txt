@@ -1,0 +1,41 @@
+
+1) Automatic Sorting.  Pictures should be only copied into the root level of the file 
+ system.  I.E.  If you have mounted it at ~/MyPFS in your home directory, you would 
+ just copy pictures to that directory, not any subdirectories.  YPFS should not display
+ them there, though -- it should automatically move/link the file to the appriate subdirectories.
+
+2) Sorting by date taken.  For pictures that have EXIF headers, they should be read.  
+   For other pictures, the date the file was created should be used instead. 
+
+When YPFS is mounted, it will scan the mount directory and create new directories according 
+to the dates it reads on the pictures. Next, symlinks will be created to 'sort' the files 
+into their appropriate date marked directories. Sorting will be either according to the EXIF 
+header date taken or the date the file was created. There is a library that will be used to 
+read EXIF headers. Where can you find the date of creation of an arbitrary file? YPFS should 
+keep track of the files in mount directory either by scanning periodically or by placing a 
+flag on the mount directory (what data structure would i need to watch to do that?)
+ 
+
+3) Clean Back-end Storage.  You won't be implementing a full file system, so any files in   
+ ~/MyPFS will have to have a representation in a back-end store. Conceptually, this could 
+ be anything -- a database, a magic file in /tmp, a hidden ~/.mypics directory. However, 
+ implement this so that the picture repository will in fact be stored in the directory 
+ that you are mounting it over.  ie  if you do not mount your fuse file system, all of the
+ relevant data should be accessible in the regular directory ~MyPFS.  
+  Special note:  This does not mean that the pictures themselves need to be stored in that 
+  underlying directory.  You might, for example,  push all of the pictures to flickr and 
+  just store the correct URL contact strings and access time metadata in the ~MyPFS directory.
+
+The picture repository will in fact be stored in the directory that you are mounting it over.  
+i.e.  if you do not mount your fuse file system, all of the relevant data should be accessible 
+in the regular directory ~MyPFS
+
+4) Type portability.  The difference between gif, jpg, png, etc. are technological, not                
+ having to do with the nature of a "picture".  So if a file IMG00923.jpg has been copied into 
+ the file system and it has been classified as Dates/2010/March/Pic3.jpg, you should also be
+ able to access Pic2.gif or Pic2.png without error.
+
+YPFS will ensure that the user-requested type is always returned, regardless of the storage 
+format (jpg, gif, png). Using ImageMagick's MagickSetImageFormat() and MagickGetImageBlob() 
+calls to create, at call time, a file object of the picture in whatever type the user specifies 
+in the read call.
