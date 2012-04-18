@@ -8,12 +8,17 @@
    For other pictures, the date the file was created should be used instead. 
 
 When YPFS is mounted, it will scan the mount directory and create new directories according 
-to the dates it reads on the pictures. Next, symlinks will be created to 'sort' the files 
+to the dates it reads on the pictures. Next, hardlinks will be created to 'sort' the files 
 into their appropriate date marked directories. Sorting will be either according to the EXIF 
 header date taken or the date the file was created. There is a library that will be used to 
 read EXIF headers. Where can you find the date of creation of an arbitrary file? YPFS should 
 keep track of the files in mount directory either by scanning periodically or by placing a 
 flag on the mount directory (what data structure would i need to watch to do that?)
+
+EXIF: first create an ExifLoader to load EXIF data into memory. From there, it would extract 
+that data as an ExifData to start manipulating it. Each Image File Directory is represented 
+by its own ExifContent within that ExifData, which contains all the tag data in ExifEntry form. 
+	http://libexif.sourceforge.net/api/
  
 
 3) Clean Back-end Storage.  You won't be implementing a full file system, so any files in   
@@ -38,4 +43,4 @@ in the regular directory ~MyPFS
 YPFS will ensure that the user-requested type is always returned, regardless of the storage 
 format (jpg, gif, png). Using ImageMagick's MagickSetImageFormat() and MagickGetImageBlob() 
 calls to create, at call time, a file object of the picture in whatever type the user specifies 
-in the read call.
+in the read call. must catch the stat calls with different extensions and return correct size. 
