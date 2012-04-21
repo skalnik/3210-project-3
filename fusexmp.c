@@ -5,6 +5,8 @@
   This program can be distributed under the terms of the GNU GPL.
   See the file COPYING.
 
+  PUT IN THE FUSE example directory
+
   gcc -Wall `pkg-config fuse --cflags --libs` fusexmp.c -o fusexmp
 */
 
@@ -30,6 +32,16 @@
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
+
+#define DEBUG 1
+
+struct sort_directoryEntry {
+	struct dirent *entries;
+	off_t size;
+	int allocated;
+};
+
+typedef struct sort_directoryEntry sort_dirent;
 
 static int xmp_getattr(const char *path, struct stat *stbuf)
 {
@@ -65,30 +77,76 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 	return 0;
 }
 
+static int compare(const void *a, const void *b){
+	int compareTo = 0;
+//	TODO:compare the path names of the two struct dirent *
+	return compareTo;
+}
 
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-		       off_t offset, struct fuse_file_info *fi)
+		       off_t offset, struct fuse_file_info *fileInfo)
 {
-	DIR *dp;
-	struct dirent *de;
+	DIR *dirStream;
+	sort_dirent sortDir;
+	struct dirent *result;
+	void* reAllocation;
+	int i = 0;
 
 	(void) offset;
-	(void) fi;
+	(void) fileInfo;
 
-	dp = opendir(path);
-	if (dp == NULL)
+	dirStream = opendir(path);
+
+	if (dirStream == NULL){
 		return -errno;
-
-	while ((de = readdir(dp)) != NULL) {
-		struct stat st;
-		memset(&st, 0, sizeof(st));
-		st.st_ino = de->d_ino;
-		st.st_mode = de->d_type << 12;
-		if (filler(buf, de->d_name, &st, 0))
-			break;
 	}
 
-	closedir(dp);
+	//increase initial allocation of entries, could change performance
+	sortDir.entries = (struct dirent*) malloc((sizeof(struct dirent))*10);
+	if(sortDir.entries == NULL){
+		return -ENOMEM;
+	}
+	sortDir.allocated = 10;
+
+	//while readdir_r returns 0, i.e. success
+	while (!(readdir_r(dirStream, &sortDir.entries[sortDir.size], &result))) {
+
+		sortDir.size++;
+
+		if(DEBUG){
+			printf("sort.Dir increased to %d\n",(int)sortDir.size);
+		}
+
+		//increases size of entries
+		if(sortDir.size >= sortDir.allocated)
+		{
+			int newsize = 2*sortDir.size;
+			reAllocation = realloc(sortDir.entries, newsize * sizeof(struct dirent));
+			if(reAllocation == NULL) {
+				free(sortDir.entries);
+				return -ENOMEM;
+			}
+			sortDir.entries = reAllocation;
+			sortDir.allocated = newsize;
+		}
+	}
+
+	//sort according to date taken or date created
+	qsort(sortDir.entries, sortDir.size, sizeof(struct dirent), compare); //TODO: implement compare
+
+	//
+
+	//fills the buffer with entries, in the order it receives them
+	for(i = offset; i < sortDir.size; i++ ){
+		struct stat fileAttr;
+		memset(&fileAttr, 0, sizeof(fileAttr));
+		fileAttr.st_ino = sortDir.entries[i].d_ino;
+		fileAttr.st_mode = sortDir.entries[i].d_type << 12;
+
+		if (filler(buf, sortDir.entries[i].d_name, &fileAttr, 0))
+			break;
+	}
+	closedir(dirStream);
 	return 0;
 }
 
