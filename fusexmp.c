@@ -21,6 +21,8 @@
 #define _XOPEN_SOURCE 500
 #endif
 
+#include <libexif/exif-loader.h>
+
 #include <fuse.h>
 #include <stdio.h>
 #include <string.h>
@@ -34,6 +36,8 @@
 #endif
 
 #define DEBUG 1
+typedef char path_t[256];
+
 
 struct sort_directoryEntry {
 	struct dirent *entries;
@@ -42,6 +46,37 @@ struct sort_directoryEntry {
 };
 
 typedef struct sort_directoryEntry sort_dirent;
+
+path_t basedir;
+
+
+void split_path(char* path, char** splitpath)
+{
+	char* token = strtok(path, "/");
+	while(token != NULL){
+		*splitpath = token;
+		splitpath++;
+		token = strtok(path, "/");
+	}
+
+	return;
+}
+
+void get_full_path(const char* localpath, char* fullpath)
+{
+	sprintf(fullpath, "%s/%s", basedir, localpath);
+}
+
+static void get_basedir()
+{
+	struct passwd pass;
+	struct passwd *result;
+	path_t buf;
+
+	getpwuid_r(getuid(), &pass, buf, 256, &result);
+	strcpy(basedir, pass.pw_dir);
+	strcat(basedir, "/.ypfs");
+}
 
 static int xmp_getattr(const char *path, struct stat *stbuf)
 {
@@ -68,7 +103,7 @@ static int xmp_access(const char *path, int mask)
 static int xmp_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
-
+	path_t real;
 	res = readlink(path, buf, size - 1);
 	if (res == -1)
 		return -errno;
@@ -77,9 +112,127 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 	return 0;
 }
 
+time_t get_mtime(const char *path)
+{
+    struct stat statbuf;
+    if (stat(path, &statbuf) == -1) {
+        perror(path);
+        exit(1);
+    }
+    return statbuf.st_mtim;
+}
+//
+//ExifEntry *date1, *date2;
+//char buff[1024], year[1024], month[1024], name1[2048], name2[2048];
+//struct tm file_time;
+//ExifData *first = exif_data_new_from_file(dir1->d_name);
+//ExifData *second = exif_data_new_from_file(dir2->d_name);
+//
+//
+//if(first){ //has exif data
+//	date1 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
+//	exif_entry_get_value(date1, buff, sizeof(buff));
+//	strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time);
+//	strftime(year, 1024, "%Y", &file_time);
+//	strftime(month, 1024, "%B", &file_time);
+//	//get more detailed time for comparison
+//	sprintf(name1, "/%s/%s/%s", year, month, dir1->d_name);
+//
+//}
+//else{ //no exif data
+//	get_mtime(dir1->d_name);
+
+
+
 static int compare(const void *a, const void *b){
 	int compareTo = 0;
-//	TODO:compare the path names of the two struct dirent *
+	struct dirent *dir1 = (struct dirent *)a;
+	struct dirent *dir2 = (struct dirent *)b;
+
+	ExifEntry *date1, *date2;
+	char buff[1024], year[1024], month[1024];
+	struct tm file_time1, file_time2;
+	time_t filetime1, filetime2;
+
+	ExifData *first = exif_data_new_from_file(dir1->d_name);
+	ExifData *second = exif_data_new_from_file(dir2->d_name);
+
+	//get time of file, either exif or mtime
+	if(first && second){ //has exif data
+		date1 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
+		exif_entry_get_value(date1, buff, sizeof(buff));
+		strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time1);
+	}
+	else{ //no exif data
+		filetime1 = get_mtime(dir1->d_name);
+	}
+	if(second){
+		date2 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
+		exif_entry_get_value(date1, buff, sizeof(buff));
+		strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time2);
+	}
+	else{
+		filetime2 = get_mtime(dir2->d_name);
+	}
+
+	//compare times
+	if(first && second){
+		compareTo = comparator1(file_time1, file_time2, 0);
+	}
+	else if(first){
+		compareTo = comparator2(file_time1, filetime2);
+	}
+	else if(second){
+		compareTo = comparator2(file_time2, filetime1);
+	}
+	else{
+		compareTo = comparator3(filetime1, filetime2);
+	}
+	return compareTo;
+}
+
+int comparator1(struct tm a, struct tm b){
+	int compareTo = 0;
+	time_t since_epoch1 = mktime(&a);
+	time_t since_epoch2 = mktime(&b);
+	if(since_epoch1 > since_epoch2){
+		compareTo = 1;
+	}
+	else if(since_epoch1 < since_epoch2){
+		compareTo = -1;
+	}
+	else if(since_epoch1 == since_epoch2){
+			compareTo = 0;
+	}
+	return compareTo;
+}
+
+int compartor2(struct tm a, time_t b){
+	int compareTo = 0;
+	time_t since_epoch = mktime(&a);
+	if(since_epoch > b){
+		compareTo = 1;
+	}
+	else if(since_epoch < b){
+		compareTo = -1;
+	}
+	else if(since_epoch == b){
+			compareTo = 0;
+	}
+	return compareTo;
+}
+
+int comparator3(time_t a, time_t b){
+	int compareTo = 0;
+	if (a>b){
+		compareTo = 1;
+	}
+	else if(a < b){
+		compareTo = -1;
+	}
+	else{
+		compareTo = 0;
+	}
 	return compareTo;
 }
 
@@ -132,7 +285,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	}
 
 	//sort according to date taken or date created
-	qsort(sortDir.entries, sortDir.size, sizeof(struct dirent), compare); //TODO: implement compare
+	qsort(sortDir.entries, sortDir.size, sizeof(struct dirent), compare);
 
 	//
 
@@ -439,5 +592,6 @@ static struct fuse_operations xmp_oper = {
 int main(int argc, char *argv[])
 {
 	umask(0);
+	get_base_dir();
 	return fuse_main(argc, argv, &xmp_oper, NULL);
 }
