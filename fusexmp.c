@@ -7,8 +7,11 @@
 
   PUT IN THE FUSE example directory
 
-  gcc -Wall `pkg-config fuse --cflags --libs` fusexmp.c -o fusexmp
+  gcc -Wall `pkg-config fuse MagickWand --cflags --libs` fusexmp.c -o fusexmp
+
 */
+
+//TODO: make sure all paths are fully qualified
 
 #define FUSE_USE_VERSION 26
 
@@ -23,6 +26,7 @@
 
 #include <libexif/exif-loader.h>
 
+#include <stdlib.h>
 #include <fuse.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,13 +35,38 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <wand/MagickWand.h>
+#include <sys/types.h>
+#include <pwd.h>
+
+
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
 
+#define ThrowWandException(wand) \
+{ \
+  char \
+    *description; \
+ \
+  ExceptionType \
+    severity; \
+ \
+  description=MagickGetException(wand,&severity); \
+  (void) fprintf(stderr,"%s %s %lu %s\n",GetMagickModule(),description); \
+  description=(char *) MagickRelinquishMemory(description); \
+  exit(-1); \
+}
+
 #define DEBUG 1
 typedef char path_t[256];
 
+struct perf{
+	time_t load_time; //time between mount & 'ready to use'
+	time_t close_time;
+	time_t read_time;
+	time_t convert_time;
+};
 
 struct sort_directoryEntry {
 	struct dirent *entries;
@@ -67,7 +96,7 @@ void get_full_path(const char* localpath, char* fullpath)
 	sprintf(fullpath, "%s/%s", basedir, localpath);
 }
 
-static void get_basedir()
+void get_basedir()
 {
 	struct passwd pass;
 	struct passwd *result;
@@ -76,6 +105,24 @@ static void get_basedir()
 	getpwuid_r(getuid(), &pass, buf, 256, &result);
 	strcpy(basedir, pass.pw_dir);
 	strcat(basedir, "/.ypfs");
+}
+
+
+static int convert(const path_t path){ //TODO:FINISH ME
+	//this is used when we already know we don't have the format the user wants
+	char *path_extension = strrchr(path, (int)"."); //points to the "."
+	MagickBooleanType status;
+	MagickWand *magick_wand;
+
+
+	MagickWandGenesis();
+	magick_wand = NewMagickWand();
+	status = MagickReadImage(magick_wand,path);
+
+	if (status == MagickFalse){
+		ThrowWandException(magick_wand);
+	}
+	return 0;
 }
 
 static int xmp_getattr(const char *path, struct stat *stbuf)
@@ -103,7 +150,6 @@ static int xmp_access(const char *path, int mask)
 static int xmp_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
-	path_t real;
 	res = readlink(path, buf, size - 1);
 	if (res == -1)
 		return -errno;
@@ -119,7 +165,7 @@ time_t get_mtime(const char *path)
         perror(path);
         exit(1);
     }
-    return statbuf.st_mtim;
+    return statbuf.st_mtime; //or st_mtim
 }
 //
 //ExifEntry *date1, *date2;
@@ -142,9 +188,53 @@ time_t get_mtime(const char *path)
 //else{ //no exif data
 //	get_mtime(dir1->d_name);
 
+int comparatorOne(struct tm a, struct tm b){
+	int compareTo = 0;
+	time_t since_epoch1 = mktime(&a);
+	time_t since_epoch2 = mktime(&b);
+	if(since_epoch1 > since_epoch2){
+		compareTo = 1;
+	}
+	else if(since_epoch1 < since_epoch2){
+		compareTo = -1;
+	}
+	else if(since_epoch1 == since_epoch2){
+			compareTo = 0;
+	}
+	return compareTo;
+}
+
+int comparatorTwo(struct tm a, time_t b){
+	int compareTo = 0;
+	time_t since_epoch = mktime(&a);
+	if(since_epoch > b){
+		compareTo = 1;
+	}
+	else if(since_epoch < b){
+		compareTo = -1;
+	}
+	else if(since_epoch == b){
+			compareTo = 0;
+	}
+	return compareTo;
+}
+
+int comparatorThree(time_t a, time_t b){
+	int compareTo = 0;
+	if (a>b){
+		compareTo = 1;
+	}
+	else if(a < b){
+		compareTo = -1;
+	}
+	else{
+		compareTo = 0;
+	}
+	return compareTo;
+}
 
 
-static int compare(const void *a, const void *b){
+int compare(const void *a, const void *b){
 	int compareTo = 0;
 	struct dirent *dir1 = (struct dirent *)a;
 	struct dirent *dir2 = (struct dirent *)b;
@@ -177,64 +267,20 @@ static int compare(const void *a, const void *b){
 
 	//compare times
 	if(first && second){
-		compareTo = comparator1(file_time1, file_time2, 0);
+		compareTo = comparatorOne(file_time1, file_time2);
 	}
 	else if(first){
-		compareTo = comparator2(file_time1, filetime2);
+		compareTo = comparatorTwo(file_time1, filetime2);
 	}
 	else if(second){
-		compareTo = comparator2(file_time2, filetime1);
+		compareTo = comparatorTwo(file_time2, filetime1);
 	}
 	else{
-		compareTo = comparator3(filetime1, filetime2);
+		compareTo = comparatorThree(filetime1, filetime2);
 	}
 	return compareTo;
 }
 
-int comparator1(struct tm a, struct tm b){
-	int compareTo = 0;
-	time_t since_epoch1 = mktime(&a);
-	time_t since_epoch2 = mktime(&b);
-	if(since_epoch1 > since_epoch2){
-		compareTo = 1;
-	}
-	else if(since_epoch1 < since_epoch2){
-		compareTo = -1;
-	}
-	else if(since_epoch1 == since_epoch2){
-			compareTo = 0;
-	}
-	return compareTo;
-}
-
-int compartor2(struct tm a, time_t b){
-	int compareTo = 0;
-	time_t since_epoch = mktime(&a);
-	if(since_epoch > b){
-		compareTo = 1;
-	}
-	else if(since_epoch < b){
-		compareTo = -1;
-	}
-	else if(since_epoch == b){
-			compareTo = 0;
-	}
-	return compareTo;
-}
-
-int comparator3(time_t a, time_t b){
-	int compareTo = 0;
-	if (a>b){
-		compareTo = 1;
-	}
-	else if(a < b){
-		compareTo = -1;
-	}
-	else{
-		compareTo = 0;
-	}
-	return compareTo;
-}
 
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fileInfo)
@@ -255,7 +301,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	}
 
 	//increase initial allocation of entries, could change performance
-	sortDir.entries = (struct dirent*) malloc((sizeof(struct dirent))*10);
+	sortDir.entries = (struct dirent*) malloc(10 * (sizeof(struct dirent)));
 	if(sortDir.entries == NULL){
 		return -ENOMEM;
 	}
@@ -451,22 +497,53 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
+int try_different_extension(const char *broken_path){//TODO:FINISH ME
+	int out = -1, i = 0;
+	char *path = NULL;
+	strcpy(path, broken_path);
+	char *path_extension = strrchr(path, (int)"."); //points to the dot
+	char *formats[5] = {".jpg",".png",".bmp",".gif",".tiff"};
+	for(; i<sizeof(formats)/sizeof(char); i++){
+		if (!strcmp(path_extension,formats[i])){
+			continue;
+		}
+		else{
+			strcpy(path_extension, formats[i]);
+			out = open(path, O_RDONLY);
+			if(out){
+				break;
+			}
+		}
+	}
+
+	return out;
+}
+
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-	int fd;
+	int filedescriptor;
 	int res;
 
 	(void) fi;
-	fd = open(path, O_RDONLY);
-	if (fd == -1)
-		return -errno;
+	filedescriptor = open(path, O_RDONLY);
+	if (filedescriptor == -1){ //no file at that path
+		filedescriptor = try_different_extension(path);
+		if(filedescriptor){//path found with different extension
+			convert(path);
+		}
+	}
 
-	res = pread(fd, buf, size, offset);
+	if(filedescriptor == -1){
+		return -errno;
+	}
+
+
+	res = pread(filedescriptor, buf, size, offset);
 	if (res == -1)
 		res = -errno;
 
-	close(fd);
+	close(filedescriptor);
 	return res;
 }
 
@@ -592,6 +669,6 @@ static struct fuse_operations xmp_oper = {
 int main(int argc, char *argv[])
 {
 	umask(0);
-	get_base_dir();
+	get_basedir();
 	return fuse_main(argc, argv, &xmp_oper, NULL);
 }
