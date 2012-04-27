@@ -11,7 +11,6 @@
 
 */
 
-//TODO: make sure all paths are fully qualified
 
 #define FUSE_USE_VERSION 26
 
@@ -38,6 +37,7 @@
 #include <wand/MagickWand.h>
 #include <sys/types.h>
 #include <pwd.h>
+#include <sys/stat.h>
 
 
 #ifdef HAVE_SETXATTR
@@ -79,32 +79,93 @@ typedef struct sort_directoryEntry sort_dirent;
 path_t basedir;
 
 
-void split_path(char* path, char** splitpath)
-{
+
+void logging(const char* entry, char *title){
+
+	FILE *log;
+	struct timeval time;
+	gettimeofday(&time, NULL);
+
+	log = fopen("/tmp/ypfs.log", "a");
+
+	fprintf(log, "%ld:%ld \t %s \t %s\n", time.tv_sec, time.tv_usec, title, entry);
+
+	fclose(log);
+	return;
+}
+
+void loggingInt(int a, char *title){
+	FILE *log;
+	struct timeval time;
+	gettimeofday(&time, NULL);
+
+	log = fopen("/tmp/ypfs.log", "a");
+
+	fprintf(log, "%ld:%ld \t %s \t %i\n", time.tv_sec, time.tv_usec, title, a);
+
+	fclose(log);
+	return;
+}
+
+void loggingList(char** entry, char *title){
+
+	FILE *log;
+	struct timeval time;
+	int i = 1;
+	gettimeofday(&time, NULL);
+
+	log = fopen("/tmp/ypfs.log", "a");
+	fprintf(log, "%ld:%ld \t %s \t %s\n", time.tv_sec, time.tv_usec, title, entry[0]);
+	for(;i < sizeof(entry)/sizeof(char); i++){
+		fprintf(log, "\t \t \t %s\n",entry[i]);
+	}
+	fclose(log);
+	return;
+}
+
+void* fxp_init(struct fuse_conn_info *conn){
+	logging("", "init");
+
+	return conn;
+}
+
+void split_path(char* path, char** splitpath){
 	char* token = strtok(path, "/");
+	logging(path, "splitpath");
 	while(token != NULL){
 		*splitpath = token;
 		splitpath++;
 		token = strtok(path, "/");
 	}
-
+	logging(path, "path split in");
+	loggingList(splitpath, "path split out");
 	return;
 }
 
-void get_full_path(const char* localpath, char* fullpath)
-{
-	sprintf(fullpath, "%s/%s", basedir, localpath);
+char * get_full_path(char* fullpath, const char* localpath){
+	sprintf(fullpath, "%s/%s", basedir,localpath);
+	logging(localpath, "get full path in");
+	logging(fullpath, "get full path out");
+	return fullpath;
 }
 
-void get_basedir()
-{
+void get_basedir(){
 	struct passwd pass;
 	struct passwd *result;
 	path_t buf;
 
 	getpwuid_r(getuid(), &pass, buf, 256, &result);
 	strcpy(basedir, pass.pw_dir);
+	logging(basedir, "pass.pw_dir in get base dir");
 	strcat(basedir, "/.ypfs");
+	logging(basedir, "concat /.ypfs");
+
+	if(opendir(basedir) == NULL){
+		logging("","made base dir");
+		mkdir(basedir, S_IRUSR | S_IWUSR);
+	}
+	logging(basedir, "base dir");
+	return;
 }
 
 
@@ -128,8 +189,11 @@ static int convert(const path_t path){ //TODO:FINISH ME
 static int xmp_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = lstat(path, stbuf);
+	logging(fullpath,"getAttr");
+	res = lstat(fullpath, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -138,9 +202,11 @@ static int xmp_getattr(const char *path, struct stat *stbuf)
 
 static int xmp_access(const char *path, int mask)
 {
+	logging(path,"access");
 	int res;
-
-	res = access(path, mask);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+	res = access(fullpath, mask);
 	if (res == -1)
 		return -errno;
 
@@ -149,8 +215,11 @@ static int xmp_access(const char *path, int mask)
 
 static int xmp_readlink(const char *path, char *buf, size_t size)
 {
+	logging(path, "readlink");
 	int res;
-	res = readlink(path, buf, size - 1);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+	res = readlink(fullpath, buf, size - 1);
 	if (res == -1)
 		return -errno;
 
@@ -160,14 +229,17 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 
 time_t get_mtime(const char *path)
 {
+	logging(path,"mtime");
     struct stat statbuf;
-    if (stat(path, &statbuf) == -1) {
-        perror(path);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+    if (stat(fullpath, &statbuf) == -1) {
+        perror(fullpath);
         exit(1);
     }
     return statbuf.st_mtime; //or st_mtim
 }
-//
+// use this to get the file dates
 //ExifEntry *date1, *date2;
 //char buff[1024], year[1024], month[1024], name1[2048], name2[2048];
 //struct tm file_time;
@@ -235,6 +307,7 @@ int comparatorThree(time_t a, time_t b){
 
 
 int compare(const void *a, const void *b){
+	logging("", "compare");
 	int compareTo = 0;
 	struct dirent *dir1 = (struct dirent *)a;
 	struct dirent *dir2 = (struct dirent *)b;
@@ -254,6 +327,7 @@ int compare(const void *a, const void *b){
 		strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time1);
 	}
 	else{ //no exif data
+		logging(dir1->d_name,"no exif one");
 		filetime1 = get_mtime(dir1->d_name);
 	}
 	if(second){
@@ -263,21 +337,27 @@ int compare(const void *a, const void *b){
 	}
 	else{
 		filetime2 = get_mtime(dir2->d_name);
+		logging(dir2->d_name,"no exif two");
 	}
 
 	//compare times
 	if(first && second){
+		logging("","both exif data");
 		compareTo = comparatorOne(file_time1, file_time2);
 	}
 	else if(first){
+		logging("","first exif data");
 		compareTo = comparatorTwo(file_time1, filetime2);
 	}
 	else if(second){
-		compareTo = comparatorTwo(file_time2, filetime1);
+		logging("","2nd exif data");
+		compareTo = -comparatorTwo(file_time2, filetime1);
 	}
 	else{
+		logging("","no exif data");
 		compareTo = comparatorThree(filetime1, filetime2);
 	}
+
 	return compareTo;
 }
 
@@ -285,6 +365,7 @@ int compare(const void *a, const void *b){
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fileInfo)
 {
+	logging(path,"readdir");
 	DIR *dirStream;
 	sort_dirent sortDir;
 	struct dirent *result;
@@ -293,8 +374,10 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 	(void) offset;
 	(void) fileInfo;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	dirStream = opendir(path);
+	dirStream = opendir(fullpath);
 
 	if (dirStream == NULL){
 		return -errno;
@@ -306,9 +389,10 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		return -ENOMEM;
 	}
 	sortDir.allocated = 10;
+	sortDir.size = 0;
 
 	//while readdir_r returns 0, i.e. success
-	while (!(readdir_r(dirStream, &sortDir.entries[sortDir.size], &result))) {
+	while (!(readdir_r(dirStream, &sortDir.entries[sortDir.size], &result)) && result!=NULL) {
 
 		sortDir.size++;
 
@@ -316,9 +400,13 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			printf("sort.Dir increased to %d\n",(int)sortDir.size);
 		}
 
+
 		//increases size of entries
 		if(sortDir.size >= sortDir.allocated)
 		{
+			loggingInt(sortDir.size,"reAlloc size");
+			loggingInt(sortDir.allocated,"reAlloc allocation");
+
 			int newsize = 2*sortDir.size;
 			reAllocation = realloc(sortDir.entries, newsize * sizeof(struct dirent));
 			if(reAllocation == NULL) {
@@ -352,17 +440,21 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 {
 	int res;
-
+	logging(path,"mknod");
 	/* On Linux this could just be 'mknod(path, mode, rdev)' but this
 	   is more portable */
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+
 	if (S_ISREG(mode)) {
-		res = open(path, O_CREAT | O_EXCL | O_WRONLY, mode);
+		res = open(fullpath, O_CREAT | O_EXCL | O_WRONLY, mode);
 		if (res >= 0)
 			res = close(res);
 	} else if (S_ISFIFO(mode))
-		res = mkfifo(path, mode);
+		res = mkfifo(fullpath, mode);
 	else
-		res = mknod(path, mode, rdev);
+		res = mknod(fullpath, mode, rdev);
 	if (res == -1)
 		return -errno;
 
@@ -372,8 +464,10 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 static int xmp_mkdir(const char *path, mode_t mode)
 {
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = mkdir(path, mode);
+	res = mkdir(fullpath, mode);
 	if (res == -1)
 		return -errno;
 
@@ -383,8 +477,10 @@ static int xmp_mkdir(const char *path, mode_t mode)
 static int xmp_unlink(const char *path)
 {
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = unlink(path);
+	res = unlink(fullpath);
 	if (res == -1)
 		return -errno;
 
@@ -394,8 +490,10 @@ static int xmp_unlink(const char *path)
 static int xmp_rmdir(const char *path)
 {
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = rmdir(path);
+	res = rmdir(fullpath);
 	if (res == -1)
 		return -errno;
 
@@ -438,8 +536,10 @@ static int xmp_link(const char *from, const char *to)
 static int xmp_chmod(const char *path, mode_t mode)
 {
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = chmod(path, mode);
+	res = chmod(fullpath, mode);
 	if (res == -1)
 		return -errno;
 
@@ -449,8 +549,10 @@ static int xmp_chmod(const char *path, mode_t mode)
 static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 {
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = lchown(path, uid, gid);
+	res = lchown(fullpath, uid, gid);
 	if (res == -1)
 		return -errno;
 
@@ -459,9 +561,12 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 
 static int xmp_truncate(const char *path, off_t size)
 {
+	logging(path,"truncate");
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = truncate(path, size);
+	res = truncate(fullpath, size);
 	if (res == -1)
 		return -errno;
 
@@ -472,13 +577,15 @@ static int xmp_utimens(const char *path, const struct timespec ts[2])
 {
 	int res;
 	struct timeval tv[2];
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
 	tv[0].tv_sec = ts[0].tv_sec;
 	tv[0].tv_usec = ts[0].tv_nsec / 1000;
 	tv[1].tv_sec = ts[1].tv_sec;
 	tv[1].tv_usec = ts[1].tv_nsec / 1000;
 
-	res = utimes(path, tv);
+	res = utimes(fullpath, tv);
 	if (res == -1)
 		return -errno;
 
@@ -487,9 +594,12 @@ static int xmp_utimens(const char *path, const struct timespec ts[2])
 
 static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
+	logging(path, "open");
 	int res;
+	path_t fullpath;
+	get_full_path(fullpath, path);
 
-	res = open(path, fi->flags);
+	res = open(fullpath, fi->flags);
 	if (res == -1)
 		return -errno;
 
@@ -497,20 +607,25 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 	return 0;
 }
 
-int try_different_extension(const char *broken_path){//TODO:FINISH ME
+int try_different_extension(const char *broken_path){ //path should already be properly qualified
+	logging(broken_path,"try extension");
 	int out = -1, i = 0;
 	char *path = NULL;
 	strcpy(path, broken_path);
+
 	char *path_extension = strrchr(path, (int)"."); //points to the dot
 	char *formats[5] = {".jpg",".png",".bmp",".gif",".tiff"};
 	for(; i<sizeof(formats)/sizeof(char); i++){
 		if (!strcmp(path_extension,formats[i])){
+			logging(formats[i], "ext rejected");
 			continue;
 		}
 		else{
+			logging(formats[i], "ext attempt");
 			strcpy(path_extension, formats[i]);
 			out = open(path, O_RDONLY);
 			if(out){
+				logging(formats[i], "ext found");
 				break;
 			}
 		}
@@ -522,15 +637,20 @@ int try_different_extension(const char *broken_path){//TODO:FINISH ME
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
+	logging(path, "read");
 	int filedescriptor;
 	int res;
 
 	(void) fi;
-	filedescriptor = open(path, O_RDONLY);
+
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+	filedescriptor = open(fullpath, O_RDONLY);
 	if (filedescriptor == -1){ //no file at that path
-		filedescriptor = try_different_extension(path);
+		filedescriptor = try_different_extension(fullpath);
 		if(filedescriptor){//path found with different extension
-			convert(path);
+			convert(fullpath);
 		}
 	}
 
@@ -550,11 +670,15 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 static int xmp_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
+	logging(path, "write");
 	int fd;
 	int res;
 
 	(void) fi;
-	fd = open(path, O_WRONLY);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+	fd = open(fullpath, O_WRONLY);
 	if (fd == -1)
 		return -errno;
 
@@ -568,10 +692,18 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 
 static int xmp_statfs(const char *path, struct statvfs *stbuf)
 {
+	logging(path, "statfs");
 	int res;
+	path_t fullpath;
 
-	res = statvfs(path, stbuf);
+	get_full_path(fullpath, path);
+
+	logging(fullpath, "statfs");
+	res = statvfs(fullpath, stbuf);
+
+	loggingInt(res, "statvfs return");
 	if (res == -1)
+		loggingInt(-errno, "statfs fail");
 		return -errno;
 
 	return 0;
@@ -604,7 +736,10 @@ static int xmp_fsync(const char *path, int isdatasync,
 static int xmp_setxattr(const char *path, const char *name, const char *value,
 			size_t size, int flags)
 {
-	int res = lsetxattr(path, name, value, size, flags);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+	int res = lsetxattr(fullpath, name, value, size, flags);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -613,7 +748,10 @@ static int xmp_setxattr(const char *path, const char *name, const char *value,
 static int xmp_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
-	int res = lgetxattr(path, name, value, size);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+	int res = lgetxattr(fullpath, name, value, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -621,7 +759,10 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 
 static int xmp_listxattr(const char *path, char *list, size_t size)
 {
-	int res = llistxattr(path, list, size);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+	int res = llistxattr(fullpath, list, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -629,7 +770,10 @@ static int xmp_listxattr(const char *path, char *list, size_t size)
 
 static int xmp_removexattr(const char *path, const char *name)
 {
-	int res = lremovexattr(path, name);
+	path_t fullpath;
+	get_full_path(fullpath, path);
+
+	int res = lremovexattr(fullpath, name);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -637,6 +781,7 @@ static int xmp_removexattr(const char *path, const char *name)
 #endif /* HAVE_SETXATTR */
 
 static struct fuse_operations xmp_oper = {
+	.init		= fxp_init,
 	.getattr	= xmp_getattr,
 	.access		= xmp_access,
 	.readlink	= xmp_readlink,
@@ -668,7 +813,10 @@ static struct fuse_operations xmp_oper = {
 
 int main(int argc, char *argv[])
 {
+	logging("RUNTIME----------","---------NEW");
 	umask(0);
+//	basedir = get_current_dir_name();
 	get_basedir();
+	logging("", "before fuse_main");
 	return fuse_main(argc, argv, &xmp_oper, NULL);
 }
