@@ -24,7 +24,7 @@
 #endif
 
 #include <libexif/exif-loader.h>
-
+#include <ulockmgr.h>
 #include <stdlib.h>
 #include <fuse.h>
 #include <stdio.h>
@@ -72,12 +72,13 @@ struct sort_directoryEntry {
 	struct dirent *entries;
 	off_t size;
 	int allocated;
+	off_t offset;
 };
 
 typedef struct sort_directoryEntry sort_dirent;
 
 path_t basedir;
-
+path_t mountdir;
 
 
 void logging(const char* entry, char *title){
@@ -123,11 +124,6 @@ void loggingList(char** entry, char *title){
 	return;
 }
 
-void* fxp_init(struct fuse_conn_info *conn){
-	logging("", "init");
-
-	return conn;
-}
 
 void split_path(char* path, char** splitpath){
 	char* token = strtok(path, "/");
@@ -142,7 +138,7 @@ void split_path(char* path, char** splitpath){
 	return;
 }
 
-char * get_full_path(char* fullpath, const char* localpath){
+char * get_raw_path(char* fullpath, const char* localpath){
 	sprintf(fullpath, "%s/%s", basedir,localpath);
 	logging(localpath, "get full path in");
 	logging(fullpath, "get full path out");
@@ -168,10 +164,9 @@ void get_basedir(){
 	return;
 }
 
-
 static int convert(const path_t path){ //TODO:FINISH ME
 	//this is used when we already know we don't have the format the user wants
-	char *path_extension = strrchr(path, (int)"."); //points to the "."
+	char *path_extension = strrchr(path, '.'); //points to the "."
 	MagickBooleanType status;
 	MagickWand *magick_wand;
 
@@ -190,7 +185,7 @@ static int xmp_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	logging(fullpath,"getAttr");
 	res = lstat(fullpath, stbuf);
@@ -205,7 +200,7 @@ static int xmp_access(const char *path, int mask)
 	logging(path,"access");
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 	res = access(fullpath, mask);
 	if (res == -1)
 		return -errno;
@@ -218,7 +213,7 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 	logging(path, "readlink");
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 	res = readlink(fullpath, buf, size - 1);
 	if (res == -1)
 		return -errno;
@@ -232,33 +227,13 @@ time_t get_mtime(const char *path)
 	logging(path,"mtime");
     struct stat statbuf;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
     if (stat(fullpath, &statbuf) == -1) {
         perror(fullpath);
         exit(1);
     }
     return statbuf.st_mtime; //or st_mtim
 }
-// use this to get the file dates
-//ExifEntry *date1, *date2;
-//char buff[1024], year[1024], month[1024], name1[2048], name2[2048];
-//struct tm file_time;
-//ExifData *first = exif_data_new_from_file(dir1->d_name);
-//ExifData *second = exif_data_new_from_file(dir2->d_name);
-//
-//
-//if(first){ //has exif data
-//	date1 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
-//	exif_entry_get_value(date1, buff, sizeof(buff));
-//	strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time);
-//	strftime(year, 1024, "%Y", &file_time);
-//	strftime(month, 1024, "%B", &file_time);
-//	//get more detailed time for comparison
-//	sprintf(name1, "/%s/%s/%s", year, month, dir1->d_name);
-//
-//}
-//else{ //no exif data
-//	get_mtime(dir1->d_name);
 
 int comparatorOne(struct tm a, struct tm b){
 	int compareTo = 0;
@@ -305,7 +280,6 @@ int comparatorThree(time_t a, time_t b){
 	return compareTo;
 }
 
-
 int compare(const void *a, const void *b){
 	logging("", "compare");
 	int compareTo = 0;
@@ -313,7 +287,7 @@ int compare(const void *a, const void *b){
 	struct dirent *dir2 = (struct dirent *)b;
 
 	ExifEntry *date1, *date2;
-	char buff[1024], year[1024], month[1024];
+	char buff[1024];
 	struct tm file_time1, file_time2;
 	time_t filetime1, filetime2;
 
@@ -325,15 +299,19 @@ int compare(const void *a, const void *b){
 		date1 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
 		exif_entry_get_value(date1, buff, sizeof(buff));
 		strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time1);
+		logging(dir1->d_name,"exif one");
 	}
 	else{ //no exif data
 		logging(dir1->d_name,"no exif one");
 		filetime1 = get_mtime(dir1->d_name);
 	}
+
 	if(second){
 		date2 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
 		exif_entry_get_value(date1, buff, sizeof(buff));
 		strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time2);
+		logging(dir2->d_name,"exif two");
+
 	}
 	else{
 		filetime2 = get_mtime(dir2->d_name);
@@ -342,25 +320,24 @@ int compare(const void *a, const void *b){
 
 	//compare times
 	if(first && second){
-		logging("","both exif data");
+//		logging("","both exif data");
 		compareTo = comparatorOne(file_time1, file_time2);
 	}
 	else if(first){
-		logging("","first exif data");
+//		logging("","first exif data");
 		compareTo = comparatorTwo(file_time1, filetime2);
 	}
 	else if(second){
-		logging("","2nd exif data");
+//		logging("","2nd exif data");
 		compareTo = -comparatorTwo(file_time2, filetime1);
 	}
 	else{
-		logging("","no exif data");
+//		logging("","no exif data");
 		compareTo = comparatorThree(filetime1, filetime2);
 	}
-
+	loggingInt(compareTo,"compare :");
 	return compareTo;
 }
-
 
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		       off_t offset, struct fuse_file_info *fileInfo)
@@ -370,12 +347,13 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	sort_dirent sortDir;
 	struct dirent *result;
 	void* reAllocation;
-	int i = 0;
+	int i = 0, ret, initAlloc = 10;
 
 	(void) offset;
 	(void) fileInfo;
+
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	dirStream = opendir(fullpath);
 
@@ -384,55 +362,57 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	}
 
 	//increase initial allocation of entries, could change performance
-	sortDir.entries = (struct dirent*) malloc(10 * (sizeof(struct dirent)));
-	if(sortDir.entries == NULL){
-		return -ENOMEM;
-	}
-	sortDir.allocated = 10;
 	sortDir.size = 0;
 
-	//while readdir_r returns 0, i.e. success
-	while (!(readdir_r(dirStream, &sortDir.entries[sortDir.size], &result)) && result!=NULL) {
-
-		sortDir.size++;
-
-		if(DEBUG){
-			printf("sort.Dir increased to %d\n",(int)sortDir.size);
+	if(!sortDir.size) {
+		loggingInt(sortDir.size, "sortDir.size == 0");
+		//increase initial allocation of entries, could change performance
+		sortDir.entries = malloc(sizeof(struct dirent) * initAlloc);
+		if (sortDir.entries == NULL){
+			return -ENOMEM;
 		}
+		sortDir.allocated = initAlloc;
 
-
-		//increases size of entries
-		if(sortDir.size >= sortDir.allocated)
-		{
-			loggingInt(sortDir.size,"reAlloc size");
-			loggingInt(sortDir.allocated,"reAlloc allocation");
-
-			int newsize = 2*sortDir.size;
-			reAllocation = realloc(sortDir.entries, newsize * sizeof(struct dirent));
-			if(reAllocation == NULL) {
-				free(sortDir.entries);
-				return -ENOMEM;
+		while (!(ret = readdir_r(dirStream, &sortDir.entries[sortDir.size],&result))) {
+			if (result == NULL){
+				break;
 			}
-			sortDir.entries = reAllocation;
-			sortDir.allocated = newsize;
+
+			sortDir.size++;
+
+			if (sortDir.size >= sortDir.allocated) {
+				char buff[256];
+				sprintf(buff,"%d",(int)sortDir.size);
+				logging(buff,":: sortDir.entries realloced at");
+				int newAlloc = 2 * sortDir.allocated;
+				reAllocation = realloc(sortDir.entries, newAlloc * sizeof(struct dirent));
+				if (reAllocation == NULL) {
+					free(sortDir.entries);
+					return -ENOMEM;
+				}
+				sortDir.entries = reAllocation;
+				sortDir.allocated = newAlloc;
+			}
 		}
+
+		if (ret) { //readdir_r fail
+			free(sortDir.entries);
+			return -ret;
+		}
+
+		qsort(sortDir.entries, sortDir.size, sizeof(struct dirent), compare);
+
 	}
 
-	//sort according to date taken or date created
-	qsort(sortDir.entries, sortDir.size, sizeof(struct dirent), compare);
-
-	//
-
-	//fills the buffer with entries, in the order it receives them
-	for(i = offset; i < sortDir.size; i++ ){
-		struct stat fileAttr;
-		memset(&fileAttr, 0, sizeof(fileAttr));
-		fileAttr.st_ino = sortDir.entries[i].d_ino;
-		fileAttr.st_mode = sortDir.entries[i].d_type << 12;
-
-		if (filler(buf, sortDir.entries[i].d_name, &fileAttr, 0))
-			break;
+	for(i = offset; i < sortDir.size; i++) {
+			struct stat st;
+			memset(&st, 0, sizeof(st));
+			st.st_ino = sortDir.entries[i].d_ino;
+			st.st_mode = sortDir.entries[i].d_type << 12;
+			if (filler(buf, sortDir.entries[i].d_name, &st, i+1))
+				break;
 	}
+
 	closedir(dirStream);
 	return 0;
 }
@@ -444,7 +424,7 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 	/* On Linux this could just be 'mknod(path, mode, rdev)' but this
 	   is more portable */
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 
 	if (S_ISREG(mode)) {
@@ -465,7 +445,7 @@ static int xmp_mkdir(const char *path, mode_t mode)
 {
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = mkdir(fullpath, mode);
 	if (res == -1)
@@ -478,7 +458,7 @@ static int xmp_unlink(const char *path)
 {
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = unlink(fullpath);
 	if (res == -1)
@@ -491,7 +471,7 @@ static int xmp_rmdir(const char *path)
 {
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = rmdir(fullpath);
 	if (res == -1)
@@ -537,7 +517,7 @@ static int xmp_chmod(const char *path, mode_t mode)
 {
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = chmod(fullpath, mode);
 	if (res == -1)
@@ -550,7 +530,7 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 {
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = lchown(fullpath, uid, gid);
 	if (res == -1)
@@ -564,7 +544,7 @@ static int xmp_truncate(const char *path, off_t size)
 	logging(path,"truncate");
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = truncate(fullpath, size);
 	if (res == -1)
@@ -578,7 +558,7 @@ static int xmp_utimens(const char *path, const struct timespec ts[2])
 	int res;
 	struct timeval tv[2];
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	tv[0].tv_sec = ts[0].tv_sec;
 	tv[0].tv_usec = ts[0].tv_nsec / 1000;
@@ -597,7 +577,7 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 	logging(path, "open");
 	int res;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	res = open(fullpath, fi->flags);
 	if (res == -1)
@@ -644,7 +624,7 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
 	(void) fi;
 
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	filedescriptor = open(fullpath, O_RDONLY);
 	if (filedescriptor == -1){ //no file at that path
@@ -676,7 +656,7 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 
 	(void) fi;
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	fd = open(fullpath, O_WRONLY);
 	if (fd == -1)
@@ -696,7 +676,7 @@ static int xmp_statfs(const char *path, struct statvfs *stbuf)
 	int res;
 	path_t fullpath;
 
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	logging(fullpath, "statfs");
 	res = statvfs(fullpath, stbuf);
@@ -731,13 +711,159 @@ static int xmp_fsync(const char *path, int isdatasync,
 	return 0;
 }
 
+static int dirExists(path_t path){
+	struct stat st;
+
+	return stat(path,&st) == 0;
+}
+
+void myMakeDir(path_t path){
+
+	if(!dirExists(path)){
+		int ret = mkdir(path, S_IRWXU|S_IRWXG|S_IRWXO );
+		logging(path,(ret == 0)?"made it":"didn't make it");
+		if(ret !=0)logging(strerror(errno), "why you no make?");
+	}
+	else{
+		logging(path, "already exists");
+
+	}
+}
+
+void getMountPath(path_t path){
+	FILE *fp = fopen("/etc/mtab","r");
+	if(fp == NULL){
+		return;
+	}
+	char buf[1024];
+	while(1){
+		logging("","I'm down here");
+		if (fgets(buf,sizeof(buf), fp) == NULL){
+			fclose(fp);
+			return;
+		}
+
+		if(strncmp(buf,"fusexmp",sizeof("fusexmp")-1) == 0){
+			char* start = strchr(buf,' ')+1;
+			char* end = strchr(start, ' ');
+			*end = '\0';
+			strcpy(path,start);
+			fclose(fp);
+			logging(path,"THIS IS THE MOUNT POINT");
+			return;
+		}
+	}
+}
+
+void* fxp_init(struct fuse_conn_info *conn){
+	logging(basedir, "init");
+
+	DIR *dirStream;
+	sort_dirent sortDir;
+	struct dirent *result;
+	void* reAllocation;
+	int i = 0, ret, initAlloc = 10;
+
+	getMountPath(mountdir);
+
+	dirStream = opendir(basedir);
+
+	if (dirStream == NULL){
+		return NULL;
+	}
+
+	//increase initial allocation of entries, could change performance
+	sortDir.size = 0;
+
+	//increase initial allocation of entries, could change performance
+	sortDir.entries = malloc(sizeof(struct dirent) * initAlloc);
+	if (sortDir.entries == NULL)
+		return NULL;
+	sortDir.allocated = initAlloc;
+
+	while (!(ret = readdir_r(dirStream, &sortDir.entries[sortDir.size],&result))) {
+		if (result == NULL)
+			break;
+
+		sortDir.size++;
+
+		if (sortDir.size >= sortDir.allocated) {
+			char buff[256];
+			sprintf(buff,"%d",(int)sortDir.size);
+			logging(buff,":: sortDir.entries realloced at");
+			int newAlloc = 2 * sortDir.allocated;
+			reAllocation = realloc(sortDir.entries, newAlloc * sizeof(struct dirent));
+			if (reAllocation == NULL) {
+				free(sortDir.entries);
+				return NULL;
+			}
+			sortDir.entries = reAllocation;
+			sortDir.allocated = newAlloc;
+		}
+	}
+
+	if (ret) { //readdir_r fail
+		free(sortDir.entries);
+		return NULL;
+	}
+
+	qsort(sortDir.entries, sortDir.size, sizeof(struct dirent), compare);
+
+
+
+	//sortDir.entries now contains the sorted list of pictures in the basedir
+	for(i = 0; i < sortDir.size; i++){
+		char buff[64], year[64], month[64];
+		path_t dirNameWithDate, fullName, rawName;
+		struct tm file_time;
+		ExifData *first = exif_data_new_from_file(sortDir.entries[i].d_name);
+
+		if(first){ //has exif data
+			ExifEntry *date1;
+			date1 = exif_content_get_entry(first->ifd[EXIF_IFD_0], EXIF_TAG_DATE_TIME);
+			exif_entry_get_value(date1, buff, sizeof(buff));
+			strptime(buff, "%Y:%m:%d %H:%M:%S", &file_time);
+		}
+		else{ //no exif data
+			time_t time = get_mtime(sortDir.entries[i].d_name);
+			file_time = *gmtime(&time);
+		}
+
+		strftime(year, 64, "%Y", &file_time);
+		strftime(month, 64, "%B", &file_time);
+
+		sprintf(dirNameWithDate, "%s/%s",basedir,year);
+		logging(dirNameWithDate,"DERP DERP");
+		myMakeDir(dirNameWithDate);
+
+		sprintf(dirNameWithDate, "%s/%s/%s",basedir,year, month);
+		myMakeDir(dirNameWithDate);
+
+		sprintf(fullName, "%s/%s",dirNameWithDate,sortDir.entries[i].d_name);
+
+		sprintf(rawName, "%s/%s", basedir,sortDir.entries[i].d_name);
+
+		{
+
+		int ret = link(rawName,fullName);
+		logging(dirNameWithDate,(ret == 0)?"linked it":"didn't link it");
+		logging(rawName,"tried to link");
+		if(ret !=0)logging(strerror(errno), "why you no link?");
+
+		}
+	}
+	closedir(dirStream);
+
+	return NULL;
+}
+
 #ifdef HAVE_SETXATTR
 /* xattr operations are optional and can safely be left unimplemented */
 static int xmp_setxattr(const char *path, const char *name, const char *value,
 			size_t size, int flags)
 {
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	int res = lsetxattr(fullpath, name, value, size, flags);
 	if (res == -1)
@@ -749,7 +875,7 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	int res = lgetxattr(fullpath, name, value, size);
 	if (res == -1)
@@ -760,7 +886,7 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 static int xmp_listxattr(const char *path, char *list, size_t size)
 {
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	int res = llistxattr(fullpath, list, size);
 	if (res == -1)
@@ -771,7 +897,7 @@ static int xmp_listxattr(const char *path, char *list, size_t size)
 static int xmp_removexattr(const char *path, const char *name)
 {
 	path_t fullpath;
-	get_full_path(fullpath, path);
+	get_raw_path(fullpath, path);
 
 	int res = lremovexattr(fullpath, name);
 	if (res == -1)
